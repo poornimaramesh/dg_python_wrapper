@@ -5,7 +5,7 @@ from IPython.display import clear_output
 from scipy.stats import multivariate_normal as mnorm
 from scipy.stats import norm
 
-from .utils import Higham, check_positive_definite, make_symmetric
+from .utils import Higham, check_positive_definite, heaviside, make_symmetric
 
 
 class WarningDGOpt(UserWarning):
@@ -221,4 +221,49 @@ class DGModel:
             higham = Higham()
             gauss_corr = higham.higham_correction(gauss_corr)
         gauss_cov = make_symmetric(gauss_corr)
+        setattr(self, "gauss_cov", gauss_cov)
         return gauss_cov
+
+
+def sample(
+    gauss_mean: np.ndarray, gauss_cov: np.ndarray, n_samples: int = 1
+) -> np.ndarray:
+    """
+    Sample from the fitted DG model.
+
+    Inputs:
+        gauss_mean: mean of the multivariate Gaussian.
+        gauss_cov: covariance of the multivariate Gaussian.
+        n_samples: number of samples to draw.
+    Returns:
+        np.ndarray: samples drawn from the fitted DG model.
+    """
+    samples = mnorm(mean=gauss_mean, cov=gauss_cov).rvs(size=n_samples)
+
+    return heaviside(samples)
+
+
+def pdf(gauss_mean: np.ndarray, gauss_cov: np.ndarray, x: np.ndarray) -> float | np.ndarray:
+    """
+    Computes the probability density function of the fitted DG model.
+
+    Inputs:
+        gauss_mean: mean of the multivariate Gaussian.
+        gauss_cov: covariance of the multivariate Gaussian.
+        x: input binary data to compute pdf for.
+    Returns:
+        np.ndarray: pdf values for the input data.
+    """
+    lower_limit = np.zeros_like(gauss_mean) * -np.inf
+    upper_limit = np.ones_like(gauss_mean) * np.inf
+
+    lower_limit = np.where(x == 0, upper_limit, x)
+    upper_limit = np.where(x == 1, lower_limit, x)
+
+    return mnorm.cdf(
+        x=upper_limit,
+        mean=gauss_mean,
+        cov=gauss_cov,
+        lower_limit=lower_limit,
+        allow_singular=True,
+    )
