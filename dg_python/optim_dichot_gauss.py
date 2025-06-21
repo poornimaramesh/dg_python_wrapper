@@ -3,6 +3,7 @@ from scipy.stats import norm, multivariate_normal as mnorm
 from scipy.special import erfinv, erf
 from IPython.display import clear_output
 
+from .utils import make_symmetric, check_positive_definite, Higham
 import warnings
 
 
@@ -10,53 +11,60 @@ class WarningDGOpt(UserWarning):
     pass
 
 
-def get_bivargauss_cdf(vals, corr_coef):
+def get_bivargauss_cdf(input1: float, input2: float, corr_coef: float) -> float:
     """
     Computes cdf of a bivariate Gaussian distribution with mean zero, variance 1 and input correlation.
 
     Inputs:
-        :param vals: arguments for bivariate cdf (μi, μj).
-        :param corr_coef: correlation coefficient of biavariate Gaussian (Λij).
+        input1: mean of the Gaussian latent (μi).
+        input2: mean of the second Gaussian latent (μj).
+        corr_coef: correlation coefficient between the two Gaussian latents (ρij).
 
     Returns:
-        :return: Φ2([μi, μj], Λij)
+        float: bivariate cdf Φ2([μi, μj], Λij)
     """
     cov = np.eye(2)
     cov[1, 0], cov[0, 1] = corr_coef, corr_coef
-    cdf = mnorm.cdf(vals, mean=[0., 0.], cov=cov)
+    cdf = mnorm.cdf([input1, input2], mean=[0., 0.], cov=cov)
     return cdf
 
 
-def function(data_means, gauss_means, data_covar, gauss_covar):
+def objective_function(
+        data_means: np.ndarray, 
+        gauss_means: np.ndarray, 
+        data_covar: float, 
+        gauss_covar: float) -> float:
     """
     Computes the pairwise covariance eqn for root finding algorithm.
 
     Inputs:
-        :param data_means: mean of binary spike train of 2 neurons (ri, rj).
-        :param gauss_means: mean of bivariate Gaussian that calculated from data for the 2 neurons (μi, μj).
-        :param data_covar: covariance between the spike trains of the 2 neurons (Σij).
-        :param gauss_covar: covariance of the bivariate Gaussian distribution corresponding to the 2 neurons (Λij).
+        data_means: means of the binary data (m_i, m_j).
+        gauss_means: means of the bivariate Gaussian (μ_i, μ_j).
+        data_covar: covariance of the binary data (Σ_ij).
+        gauss_covar: covariance of the bivariate Gaussian (Λ_ij).
 
     Returns:
-        :return: Φ2([μi, μi], Λij) - ri*rj - Σij
+        float: objective function for root finding algorithm 
+            Φ2([μ_i, μ_i], Λ_ij) - r_i*r_j - Σ_ij
     """
-    bivar_gauss_cdf = np.mean(get_bivargauss_cdf(vals=np.array(gauss_means).T,
+    bivar_gauss_cdf = np.mean(get_bivargauss_cdf(input1=gauss_means[0], 
+                                                 input2=gauss_means[1],
                                                  corr_coef=gauss_covar))
     return bivar_gauss_cdf - np.prod(data_means) - data_covar
 
 
-def find_root_bisection(*eqn_input, eqn=function, maxiters=1000, tol=1e-10):
+def find_root_bisection(*eqn_input, eqn=objective_function, maxiters=1000, tol=1e-10):
     """
     Finds root of input equation using the bisection algorithm.
 
     Inputs:
-        :param eqn_input: list containing inputs to \'eqn\' method.
-        :param eqn: method implementing the equation for which we need the root.
-        :param maxiters: max. number of iterations for bisection algorithm.
-        :param tol: tolerance value for convergence of bisection algorithm.
+        eqn_input: inputs to the equation for which root is to be found.
+        eqn: function for which root is to be found. Default is objective_function.
+        maxiters: maximum number of iterations for the bisection algorithm. Default is 1000.
+        tol: tolerance value for root finding. Default is 1e-10.
 
     Returns:
-        :return: root of \'eqn\'.
+        float: root of the input equation.
     """
     λ0 = -.99999
     λ1 = .99999
@@ -98,27 +106,26 @@ def find_root_bisection(*eqn_input, eqn=function, maxiters=1000, tol=1e-10):
     return λ
 
 
-class DGOptimise(object):
+class DGModel:
     """
-        Finds the parameters of the multivariate Gaussian that best fit the given binary spike train.
+        Finds the parameters of the multivariate Gaussian that best fit the given binary data.
         Inputs:
-            :param data: binary spike count data of size timebins x repeats x neurons
+            data: binary data to fit the DG model to of shape (timebins, repeats, features).
     """
 
-    def __init__(self, data):
-        self.timebins, self.trials, self.num_neur = data.shape
-        self.tril_inds = np.tril_indices(self.num_neur, -1)
+    def __init__(self, data: np.ndarray) -> None:
+        self.timebins, self.repeats, self.features = data.shape
+        self.tril_inds = np.tril_indices(self.features, -1)
         self.data = data
 
     @property
-    def gauss_mean(self):
+    def gauss_mean(self) -> np.ndarray:
         """
-        Computes mean of the multivariate Gaussian corresponding to the input binary spike train.
+        Computes mean of the multivariate Gaussian corresponding to the input binary data.
         """
         data = self.data
 
         mean = data.mean(1)
-        self._check_mean(mean)  # Check if mean lies between 0 and 1
 
         # Need this to ensure inverse cdf calculation (norm.ppf()) does not break
         mean[mean == 0.] += 1e-4
@@ -128,34 +135,37 @@ class DGOptimise(object):
         return gauss_mean
 
     @property
-    def data_tvar_covariance(self):
-        """Computes covariance between spike trains from different neurons, averaged across timebins and trials.
-           Calculated for time-varying firing rate"""
+    def data_tvar_covariance(self) -> np.ndarray:
+        """
+        Computes covariance between observed binary vectors, averaged across timebins and repeats.
+        Calculated for time-varying features (e.g. firing rates).
+        """
         data = self.data
 
         data_norm = (data - data.mean(0)).reshape(self.timebins, -1)
-        tot_covar = data_norm.T.dot(data_norm).reshape(self.trials, self.num_neur, self.trials, self.num_neur)
-        inds = range(self.trials)
+        tot_covar = data_norm.T.dot(data_norm).reshape(self.repeats, self.features, self.repeats, self.features)
+        inds = range(self.repeats)
         tot_covar = tot_covar[inds, :, inds, :].mean(0) / self.timebins
         return tot_covar
 
     @property
-    def data_tfix_covariance(self):
-        """Computes covariance between spike trains from different neurons, averaged across repeats. Calculated for
-           fixed firing rate."""
+    def data_tfix_covariance(self) -> np.ndarray:
+        """
+        Computes covariance between observed binary vectors, averaged across repeats.
+        Calculated for fixed features across timebins.
+        """
         data = self.data
-        data_norm = (data - data.mean(1)).reshape(-1, self.num_neur)
-        tot_covar = data_norm.T.dot(data_norm) / (self.timebins * self.trials)
+        data_norm = (data - data.mean(1)).reshape(-1, self.features)
+        tot_covar = data_norm.T.dot(data_norm) / (self.timebins * self.repeats)
 
         return tot_covar
 
-    def get_gauss_correlation(self, set_attr=True, **kwargs):
-        """
-        Computes the correlation matrix of the multivariate Gaussian that best fits the input binary spike trains.
-        Inputs:
-            :param set_attr: set to True to make computed correlation matrix an attribute of the class.
-            :param kwargs: arguments for bisection algorithm method (see help(find_root_bisection)).
 
+    def _compute_gauss_correlation(self):
+        """
+        Computes the correlation matrix of the multivariate Gaussian that best fits the input binary data.
+        Inputs:
+            
         Returns:
             :return: computed correlation matrix of multivariate Gaussian distribution.
         """
@@ -166,28 +176,35 @@ class DGOptimise(object):
         else:
             data_covar = self.data_tfix_covariance
 
-        gauss_corr = np.eye(self.num_neur)
+        gauss_corr = np.eye(self.features)
 
         # Find pairwise correlation between each unique pair of neurons
         for i, j in zip(*self.tril_inds):
             # print("Neuron pair:", i, j)
             if np.abs(data_covar[i][j]) <= 1e-10:
-                print('Data covariance is zero. Setting corresponding Gaussian dist. covariance to 0.')
+                warnings.warn('Data covariance is zero. Setting corresponding Gaussian dist. covariance to 0.')
                 gauss_corr[i][j], gauss_corr[j][i] = 0., 0.
 
             else:
                 x = find_root_bisection([data_mean[i], data_mean[j]],
                                         [gauss_mean[..., i], gauss_mean[..., j]],
                                         data_covar[i][j],
-                                        **kwargs)
+                                        )
                 gauss_corr[i][j], gauss_corr[j][i] = x, x
 
-        if set_attr:
-            setattr(self, 'gauss_corr', np.array(gauss_corr))
         return gauss_corr
-
-    def _check_mean(self, mean):
-        """Checks if input mean values lie between 0 and 1."""
-        if np.any(mean < 0) or np.any(mean > 1):
-            print('Mean should have value between 0 and 1.')
-            raise NotImplementedError
+    
+    def get_gauss_covariance(self) -> np.ndarray:
+        """
+        Computes covariance matrix of the multivariate Gaussian that best fits the input binary data.
+        Inputs:
+            
+        Returns:
+            :return: computed covariance matrix of multivariate Gaussian distribution.
+        """
+        gauss_corr = self._compute_gauss_correlation()
+        if not check_positive_definite(gauss_corr):
+            higham = Higham()
+            gauss_corr = higham.higham_correction(gauss_corr)
+        gauss_cov = make_symmetric(gauss_corr)
+        return gauss_cov
