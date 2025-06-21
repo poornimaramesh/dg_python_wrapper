@@ -1,10 +1,11 @@
-import numpy as np
-from scipy.stats import norm, multivariate_normal as mnorm
-from scipy.special import erfinv, erf
-from IPython.display import clear_output
-
-from .utils import make_symmetric, check_positive_definite, Higham
 import warnings
+
+import numpy as np
+from IPython.display import clear_output
+from scipy.stats import multivariate_normal as mnorm
+from scipy.stats import norm
+
+from .utils import Higham, check_positive_definite, make_symmetric
 
 
 class WarningDGOpt(UserWarning):
@@ -25,15 +26,16 @@ def get_bivargauss_cdf(input1: float, input2: float, corr_coef: float) -> float:
     """
     cov = np.eye(2)
     cov[1, 0], cov[0, 1] = corr_coef, corr_coef
-    cdf = mnorm.cdf([input1, input2], mean=[0., 0.], cov=cov)
+    cdf = mnorm.cdf([input1, input2], mean=[0.0, 0.0], cov=cov)
     return cdf
 
 
 def objective_function(
-        data_means: np.ndarray, 
-        gauss_means: np.ndarray, 
-        data_covar: float, 
-        gauss_covar: float) -> float:
+    data_means: np.ndarray,
+    gauss_means: np.ndarray,
+    data_covar: float,
+    gauss_covar: float,
+) -> float:
     """
     Computes the pairwise covariance eqn for root finding algorithm.
 
@@ -44,12 +46,14 @@ def objective_function(
         gauss_covar: covariance of the bivariate Gaussian (Λ_ij).
 
     Returns:
-        float: objective function for root finding algorithm 
+        float: objective function for root finding algorithm
             Φ2([μ_i, μ_i], Λ_ij) - r_i*r_j - Σ_ij
     """
-    bivar_gauss_cdf = np.mean(get_bivargauss_cdf(input1=gauss_means[0], 
-                                                 input2=gauss_means[1],
-                                                 corr_coef=gauss_covar))
+    bivar_gauss_cdf = np.mean(
+        get_bivargauss_cdf(
+            input1=gauss_means[0], input2=gauss_means[1], corr_coef=gauss_covar
+        )
+    )
     return bivar_gauss_cdf - np.prod(data_means) - data_covar
 
 
@@ -66,8 +70,8 @@ def find_root_bisection(*eqn_input, eqn=objective_function, maxiters=1000, tol=1
     Returns:
         float: root of the input equation.
     """
-    λ0 = -.99999
-    λ1 = .99999
+    λ0 = -0.99999
+    λ1 = 0.99999
 
     f0 = eqn(*eqn_input, λ0)
     f1 = eqn(*eqn_input, λ1)
@@ -75,18 +79,24 @@ def find_root_bisection(*eqn_input, eqn=objective_function, maxiters=1000, tol=1
     # print('f0, f1', f0, f1)
 
     if np.abs(f0) < tol:
-        warnings.warn("Warning: f0 is already close to 0. Returning initial value.", WarningDGOpt)
+        warnings.warn(
+            "Warning: f0 is already close to 0. Returning initial value.", WarningDGOpt
+        )
         return λ0
 
     if np.abs(f1) < tol:
-        warnings.warn("Warning: f1 is already close to 0. Returning initial value.", WarningDGOpt)
+        warnings.warn(
+            "Warning: f1 is already close to 0. Returning initial value.", WarningDGOpt
+        )
         return λ1
 
     if f0 * f1 > tol:
-        warnings.warn('Warning: Both initial covariance values lie on same side of zero crossing. '
-                      'Setting value to 0.',
-                      WarningDGOpt)
-        λ = 0.
+        warnings.warn(
+            "Warning: Both initial covariance values lie on same side of zero crossing. "
+            "Setting value to 0.",
+            WarningDGOpt,
+        )
+        λ = 0.0
         return λ
 
     f = np.inf
@@ -108,9 +118,9 @@ def find_root_bisection(*eqn_input, eqn=objective_function, maxiters=1000, tol=1
 
 class DGModel:
     """
-        Finds the parameters of the multivariate Gaussian that best fit the given binary data.
-        Inputs:
-            data: binary data to fit the DG model to of shape (timebins, repeats, features).
+    Finds the parameters of the multivariate Gaussian that best fit the given binary data.
+    Inputs:
+        data: binary data to fit the DG model to of shape (timebins, repeats, features).
     """
 
     def __init__(self, data: np.ndarray) -> None:
@@ -128,8 +138,8 @@ class DGModel:
         mean = data.mean(1)
 
         # Need this to ensure inverse cdf calculation (norm.ppf()) does not break
-        mean[mean == 0.] += 1e-4
-        mean[mean == 1.] -= 1e-4
+        mean[mean == 0.0] += 1e-4
+        mean[mean == 1.0] -= 1e-4
 
         gauss_mean = norm.ppf(mean)
         return gauss_mean
@@ -143,7 +153,9 @@ class DGModel:
         data = self.data
 
         data_norm = (data - data.mean(0)).reshape(self.timebins, -1)
-        tot_covar = data_norm.T.dot(data_norm).reshape(self.repeats, self.features, self.repeats, self.features)
+        tot_covar = data_norm.T.dot(data_norm).reshape(
+            self.repeats, self.features, self.repeats, self.features
+        )
         inds = range(self.repeats)
         tot_covar = tot_covar[inds, :, inds, :].mean(0) / self.timebins
         return tot_covar
@@ -160,12 +172,11 @@ class DGModel:
 
         return tot_covar
 
-
     def _compute_gauss_correlation(self):
         """
         Computes the correlation matrix of the multivariate Gaussian that best fits the input binary data.
         Inputs:
-            
+
         Returns:
             :return: computed correlation matrix of multivariate Gaussian distribution.
         """
@@ -182,23 +193,26 @@ class DGModel:
         for i, j in zip(*self.tril_inds):
             # print("Neuron pair:", i, j)
             if np.abs(data_covar[i][j]) <= 1e-10:
-                warnings.warn('Data covariance is zero. Setting corresponding Gaussian dist. covariance to 0.')
-                gauss_corr[i][j], gauss_corr[j][i] = 0., 0.
+                warnings.warn(
+                    "Data covariance is zero. Setting corresponding Gaussian dist. covariance to 0."
+                )
+                gauss_corr[i][j], gauss_corr[j][i] = 0.0, 0.0
 
             else:
-                x = find_root_bisection([data_mean[i], data_mean[j]],
-                                        [gauss_mean[..., i], gauss_mean[..., j]],
-                                        data_covar[i][j],
-                                        )
+                x = find_root_bisection(
+                    [data_mean[i], data_mean[j]],
+                    [gauss_mean[..., i], gauss_mean[..., j]],
+                    data_covar[i][j],
+                )
                 gauss_corr[i][j], gauss_corr[j][i] = x, x
 
         return gauss_corr
-    
+
     def get_gauss_covariance(self) -> np.ndarray:
         """
         Computes covariance matrix of the multivariate Gaussian that best fits the input binary data.
         Inputs:
-            
+
         Returns:
             :return: computed covariance matrix of multivariate Gaussian distribution.
         """
